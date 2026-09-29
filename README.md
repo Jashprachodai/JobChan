@@ -1,16 +1,21 @@
 # Airbus Bangalore Job Watcher
 
-An Android 12+ app that periodically queries Airbus's public Workday jobs API, stores a local snapshot, and sends a notification only for jobs not previously seen.
+An Android 12+ job watcher. It currently queries Airbus's public Workday jobs API, but its data layer is built around source adapters so additional companies and ATS platforms can be added without changing the UI or database model.
 
 ## Chosen approach
 
 - **Language/UI:** Kotlin, Jetpack Compose, Material 3.
 - **Networking:** Retrofit + Kotlin serialization, using a `POST` request.
+- **Sources:** `JobSourceConfig` describes a company/source; `JobSourceAdapter` converts that source's response into a common job record. Airbus Workday is the first adapter.
 - **Persistence:** Room stores a job's immutable Workday requisition ID and its snapshot.
 - **Scheduling:** WorkManager runs every 30 minutes (Android's minimum periodic interval is 15 minutes, and its timing is intentionally inexact). A manual refresh is also available.
 - **Android target:** `minSdk 31` (Android 12), `targetSdk 35`.
 
 The app is designed so the exact Workday endpoint and filter JSON are supplied in `local.properties`, not committed to source control. This avoids guessing at a location ID or publishing it in the app.
+
+## Adding a future source
+
+Add a `JobSourceConfig` to `JobSourceRegistry`, then implement a `JobSourceAdapter` for the platform (for example Greenhouse or Lever). The adapter returns `FetchedJob` values, and `JobRepository` assigns the globally unique identity `sourceId:sourceJobId`, updates only that source's jobs, and maintains an independent notification baseline for it.
 
 ## Configure
 
