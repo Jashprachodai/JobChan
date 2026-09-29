@@ -55,4 +55,6 @@ dependencies {
     implementation(libs.retrofit.serialization)
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.androidx.compose.googlefonts)
+    implementation(libs.coil.compose)
 }

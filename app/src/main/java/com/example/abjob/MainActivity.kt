@@ -87,7 +87,7 @@ private fun JobWatchScreen(openJob: (JobEntity) -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                Text("Only jobs already saved on this device are shown. The first successful check creates the baseline without alerts.", style = MaterialTheme.typography.bodySmall)
+                Text("Current Bangalore postings are sorted newest first. The first successful check creates the baseline without alerts.", style = MaterialTheme.typography.bodySmall)
             }
             items(jobs, key = { it.id }) { job ->
                 ElevatedCard(Modifier.fillMaxWidth().clickable { openJob(job) }) {
