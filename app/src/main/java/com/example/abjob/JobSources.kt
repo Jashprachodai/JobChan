@@ -19,9 +19,12 @@ import retrofit2.http.POST
 import retrofit2.http.Url
 import java.util.concurrent.TimeUnit
 
+import kotlinx.serialization.Serializable
+
 class ConfigurationException : IllegalStateException()
 
 /** Configuration is data, so adding another company does not require changing the UI or database. */
+@Serializable
 data class JobSourceConfig(
     val sourceId: String,
     val companyId: String,
@@ -33,7 +36,7 @@ data class JobSourceConfig(
 )
 
 object JobSourceRegistry {
-    val sources = listOf(
+    val defaultSources = listOf(
         JobSourceConfig(
             sourceId = "workday:airbus",
             companyId = "airbus",
@@ -51,6 +54,11 @@ object JobSourceRegistry {
         JobSourceConfig("custom:myntra", "myntra", "Myntra", "custom", "", supported = false),
         JobSourceConfig("custom:github", "github", "GitHub", "custom", "", supported = false)
     )
+
+    fun sources(context: Context): List<JobSourceConfig> {
+        val custom = try { AppGraph.preferences.customSources() } catch (_: Exception) { emptyList() }
+        return defaultSources + custom
+    }
 }
 
 data class FetchedJob(
@@ -116,7 +124,7 @@ class WorkdayAdapter : JobSourceAdapter {
     private fun parsePostedAt(postedOn: String?): Long {
         val now = System.currentTimeMillis()
         val value = postedOn.orEmpty().lowercase()
-        val amount = Regex("(\\d+)").find(value)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val amount = Regex("(\\d+)").find(value)?.groupValues?.get(1)?.toLongOrNull() ?: 1L
         return when {
             "today" in value -> now
             "yesterday" in value -> now - TimeUnit.DAYS.toMillis(1)
@@ -124,7 +132,7 @@ class WorkdayAdapter : JobSourceAdapter {
             "week" in value -> now - TimeUnit.DAYS.toMillis(amount * 7)
             "month" in value -> now - TimeUnit.DAYS.toMillis(amount * 30)
             "day" in value -> now - TimeUnit.DAYS.toMillis(amount)
-            else -> 0L
+            else -> now - TimeUnit.DAYS.toMillis(90) // Undated jobs sorted to the bottom
         }
     }
 
@@ -167,17 +175,17 @@ class GreenhouseAdapter : JobSourceAdapter {
 class JobRepository(
     private val dao: JobDao,
     private val notifications: NotificationHelper,
-    sourceConfigs: List<JobSourceConfig>
+    private val context: Context
 ) {
     private val mutex = Mutex()
-    private val configs = sourceConfigs
     private val adapters = listOf(WorkdayAdapter(), GreenhouseAdapter()).associateBy { it.adapterType }
 
     suspend fun refresh(selectedSourceIds: Set<String>, notifyForSources: Set<String>): Int = mutex.withLock {
         var newJobsCount = 0
+        val configs = JobSourceRegistry.sources(context)
         configs.filter { it.supported && it.sourceId in selectedSourceIds }.forEach { config ->
-            val adapter = adapters[config.adapterType] ?: throw ConfigurationException()
-            val fetched = adapter.fetch(config)
+            val adapter = adapters[config.adapterType] ?: return@forEach
+            val fetched = try { adapter.fetch(config) } catch (_: Exception) { emptyList() }
             val jobs = fetched.map { it.toEntity(config) }
             val existing = dao.existingKeys(jobs.map { it.jobKey }).toSet()
             val newJobs = jobs.filter { it.jobKey !in existing }

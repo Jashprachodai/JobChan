@@ -5,6 +5,8 @@ import androidx.room.*
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
 
 @Entity(tableName = "jobs")
 data class JobEntity(
@@ -22,9 +24,12 @@ data class JobEntity(
     val firstSeenAt: Long = System.currentTimeMillis()
 )
 
+data class SourceCount(val sourceId: String, val count: Int)
+
 @Dao
 interface JobDao {
     @Query("SELECT * FROM jobs ORDER BY postedAt DESC, firstSeenAt DESC") fun observeAll(): Flow<List<JobEntity>>
+    @Query("SELECT sourceId, COUNT(*) as count FROM jobs GROUP BY sourceId") fun observeSourceCounts(): Flow<List<SourceCount>>
     @Query("SELECT jobKey FROM jobs WHERE jobKey IN (:keys)") suspend fun existingKeys(keys: List<String>): List<String>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertAll(jobs: List<JobEntity>)
     @Query("""
@@ -100,12 +105,14 @@ private val MIGRATION_5_6 = object : Migration(5, 6) {
 
 class Preferences(context: Context) {
     private val prefs = context.getSharedPreferences("watcher", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
+
     fun selectedSources(allSourceIds: List<String>): Set<String> =
         prefs.getStringSet("selected_sources", null) ?: allSourceIds.toSet()
     fun setSelectedSources(sourceIds: Set<String>) = prefs.edit().putStringSet("selected_sources", sourceIds).apply()
     fun selectedLocationGroups(): Set<LocationGroup> =
         prefs.getStringSet("location_groups", null)?.mapNotNull { value -> LocationGroup.entries.find { it.name == value } }?.toSet()
-            ?: setOf(LocationGroup.INDIA)
+            ?: LocationGroup.entries.toSet()
     fun setSelectedLocationGroups(groups: Set<LocationGroup>) =
         prefs.edit().putStringSet("location_groups", groups.map { it.name }.toSet()).apply()
     fun initializedSources(sourceIds: List<String>): Set<String> = sourceIds.filterTo(mutableSetOf()) { sourceId ->
@@ -115,6 +122,25 @@ class Preferences(context: Context) {
         sourceIds.forEach { putBoolean("initialized:$it", true) }
         remove("initialized")
     }.apply()
+
+    fun customSources(): List<JobSourceConfig> {
+        val raw = prefs.getString("custom_sources_json", null) ?: return emptyList()
+        return try {
+            json.decodeFromString(raw)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun addCustomSource(config: JobSourceConfig) {
+        val list = customSources().filter { it.sourceId != config.sourceId } + config
+        prefs.edit().putString("custom_sources_json", json.encodeToString(ListSerializer(JobSourceConfig.serializer()), list)).apply()
+    }
+
+    fun removeCustomSource(sourceId: String) {
+        val list = customSources().filter { it.sourceId != sourceId }
+        prefs.edit().putString("custom_sources_json", json.encodeToString(ListSerializer(JobSourceConfig.serializer()), list)).apply()
+    }
 }
 
 enum class LocationGroup(val label: String) { INDIA("India"), REMOTE("Remote"), OTHER("Other countries") }
@@ -131,6 +157,6 @@ object AppGraph {
             .addMigrations(MIGRATION_1_4, MIGRATION_2_4, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
         preferences = Preferences(context)
-        repository = JobRepository(database.jobs(), NotificationHelper(context), JobSourceRegistry.sources)
+        repository = JobRepository(database.jobs(), NotificationHelper(context), context)
     }
 }
