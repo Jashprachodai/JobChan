@@ -32,6 +32,8 @@ data class JobSourceConfig(
     val adapterType: String,
     val endpoint: String,
     val requestJson: String = "",
+    /** The default: never require users to discover provider-specific location IDs. */
+    val clientSideLocationFiltering: Boolean = true,
     val supported: Boolean = true
 )
 
@@ -72,7 +74,11 @@ data class FetchedJob(
 
 interface JobSourceAdapter {
     val adapterType: String
-    suspend fun fetch(config: JobSourceConfig): List<FetchedJob>
+    /** Workday can use readable search text, while Greenhouse already returns an inexpensive full board. */
+    val requiresLocationSearch: Boolean get() = false
+    /** Only a complete board response can safely mark cached jobs as closed. */
+    val returnsCompleteSnapshot: Boolean get() = true
+    suspend fun fetch(config: JobSourceConfig, locationSearchTerms: List<String>): List<FetchedJob>
 }
 
 private interface WorkdayApi { @POST suspend fun jobs(@Url url: String, @Body body: JsonObject): JsonObject }
@@ -80,26 +86,39 @@ private interface GreenhouseApi { @GET suspend fun jobs(@Url url: String): JsonO
 
 class WorkdayAdapter : JobSourceAdapter {
     override val adapterType = "workday"
+    override val requiresLocationSearch = true
+    override val returnsCompleteSnapshot = false
     private val json = Json { ignoreUnknownKeys = true }
     private val api = Retrofit.Builder().baseUrl("https://placeholder.invalid/")
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build().create(WorkdayApi::class.java)
 
-    override suspend fun fetch(config: JobSourceConfig): List<FetchedJob> {
+    override suspend fun fetch(config: JobSourceConfig, locationSearchTerms: List<String>): List<FetchedJob> {
         if (config.endpoint.isBlank() || config.requestJson.isBlank()) throw ConfigurationException()
         val configured = json.parseToJsonElement(config.requestJson).jsonObject
         val pageSize = configured["limit"]?.jsonPrimitive?.intOrNull ?: throw ConfigurationException()
-        var offset = configured["offset"]?.jsonPrimitive?.intOrNull ?: 0
-        var total: Int
         val jobs = mutableListOf<FetchedJob>()
-        do {
-            val response = api.jobs(config.endpoint, JsonObject(configured + ("offset" to JsonPrimitive(offset))))
-            val postings = response["jobPostings"]?.jsonArray.orEmpty()
-            jobs += postings.mapNotNull(::toJob)
-            total = response["total"]?.jsonPrimitive?.intOrNull ?: postings.size
-            offset += pageSize
-        } while (offset < total && postings.isNotEmpty())
-        return jobs
+        locationSearchTerms.distinct().forEach { term ->
+            var offset = configured["offset"]?.jsonPrimitive?.intOrNull ?: 0
+            var total: Int
+            do {
+                val body = configured.withoutProviderLocationFacets(config.clientSideLocationFiltering)
+                val response = api.jobs(config.endpoint, JsonObject(body + mapOf("offset" to JsonPrimitive(offset), "searchText" to JsonPrimitive(term))))
+                val postings = response["jobPostings"]?.jsonArray.orEmpty()
+                jobs += postings.mapNotNull(::toJob)
+                total = response["total"]?.jsonPrimitive?.intOrNull ?: postings.size
+                offset += pageSize
+            } while (offset < total && postings.isNotEmpty())
+        }
+        return jobs.distinctBy { it.sourceJobId }
+    }
+
+    private fun JsonObject.withoutProviderLocationFacets(enabled: Boolean): JsonObject {
+        if (!enabled) return this
+        val facets = this["appliedFacets"]?.jsonObject ?: return this
+        val locationFacetNames = setOf("locations", "location", "locationCountry", "primaryLocation", "primaryLocations")
+        val unfilteredFacets = JsonObject(facets.filterKeys { it !in locationFacetNames })
+        return JsonObject(this + ("appliedFacets" to unfilteredFacets))
     }
 
     private fun toJob(value: JsonElement): FetchedJob? {
@@ -153,7 +172,7 @@ class GreenhouseAdapter : JobSourceAdapter {
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build().create(GreenhouseApi::class.java)
 
-    override suspend fun fetch(config: JobSourceConfig): List<FetchedJob> {
+    override suspend fun fetch(config: JobSourceConfig, locationSearchTerms: List<String>): List<FetchedJob> {
         if (config.endpoint.isBlank()) throw ConfigurationException()
         return api.jobs(config.endpoint)["jobs"]?.jsonArray.orEmpty().mapNotNull { item ->
             val job = item.jsonObject
@@ -180,12 +199,20 @@ class JobRepository(
     private val mutex = Mutex()
     private val adapters = listOf(WorkdayAdapter(), GreenhouseAdapter()).associateBy { it.adapterType }
 
-    suspend fun refresh(selectedSourceIds: Set<String>, notifyForSources: Set<String>): Int = mutex.withLock {
+    suspend fun refresh(
+        selectedSourceIds: Set<String>,
+        notifyForSources: Set<String>,
+        locationGroups: Set<LocationGroup>,
+        countries: Set<CountryPreset>
+    ): Int = mutex.withLock {
         var newJobsCount = 0
         val configs = JobSourceRegistry.sources(context)
         configs.filter { it.supported && it.sourceId in selectedSourceIds }.forEach { config ->
             val adapter = adapters[config.adapterType] ?: return@forEach
-            val fetched = try { adapter.fetch(config) } catch (_: Exception) { emptyList() }
+            val locationSearchTerms = readableSearchTerms(locationGroups, countries)
+            if (adapter.requiresLocationSearch && locationSearchTerms.isEmpty()) return@forEach
+            // A request failure is not evidence that every job was closed: retain the cached snapshot.
+            val fetched = try { adapter.fetch(config, locationSearchTerms) } catch (_: Exception) { return@forEach }
             val jobs = fetched.map { it.toEntity(config) }
             val existing = dao.existingKeys(jobs.map { it.jobKey }).toSet()
             val newJobs = jobs.filter { it.jobKey !in existing }
@@ -193,8 +220,11 @@ class JobRepository(
             jobs.forEach { job ->
                 dao.updateSnapshot(job.jobKey, job.title, job.location, job.postedOn, job.postedAt, job.canonicalUrl)
             }
-            if (jobs.isEmpty()) dao.deleteSource(config.sourceId) else dao.deleteNotInSource(config.sourceId, jobs.map { it.jobKey })
-            if (config.sourceId in notifyForSources && newJobs.isNotEmpty()) notifications.showNewJobs(newJobs)
+            if (adapter.returnsCompleteSnapshot) {
+                if (jobs.isEmpty()) dao.deleteSource(config.sourceId) else dao.deleteNotInSource(config.sourceId, jobs.map { it.jobKey })
+            }
+            val matchingNewJobs = newJobs.filter { it.matchesLocationFilters(locationGroups, countries) }
+            if (config.sourceId in notifyForSources && matchingNewJobs.isNotEmpty()) notifications.showNewJobs(matchingNewJobs)
             newJobsCount += newJobs.size
         }
         newJobsCount
@@ -212,6 +242,16 @@ class JobRepository(
         postedAt = postedAt,
         canonicalUrl = canonicalUrl
     )
+
+    private fun readableSearchTerms(groups: Set<LocationGroup>, countries: Set<CountryPreset>): List<String> = buildList {
+        if (LocationGroup.INDIA in groups) add("India")
+        if (LocationGroup.REMOTE in groups) add("Remote")
+        if (LocationGroup.OTHER in groups) {
+            // An empty country selection means "all other countries". Query a broad, practical set
+            // of country terms rather than attempting a 2,000-job unfiltered Workday scan.
+            (if (countries.isEmpty()) CountryPreset.entries.toList() else countries.toList()).forEach { add(it.label) }
+        }
+    }
 }
 
 class NotificationHelper(private val context: Context) {

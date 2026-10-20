@@ -76,6 +76,7 @@ private fun JobChanApp(openJob: (JobEntity) -> Unit) {
     var isRefreshing by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var showAddCompanyDialog by remember { mutableStateOf(false) }
+    var showLocationMenu by remember { mutableStateOf(false) }
 
     var sources by remember { mutableStateOf(JobSourceRegistry.sources(context)) }
     fun refreshSources() { sources = JobSourceRegistry.sources(context) }
@@ -83,12 +84,12 @@ private fun JobChanApp(openJob: (JobEntity) -> Unit) {
     val allSourceIds = remember(sources) { sources.map { it.sourceId } }
     var selectedSourceIds by remember(sources) { mutableStateOf(AppGraph.preferences.selectedSources(allSourceIds)) }
     var selectedLocationGroups by remember { mutableStateOf(AppGraph.preferences.selectedLocationGroups()) }
+    var selectedCountries by remember { mutableStateOf(AppGraph.preferences.selectedCountries()) }
 
-    // Strict recency sorting: Latest postings ALWAYS come top!
-    val displayedJobs = remember(jobs, selectedSourceIds, selectedLocationGroups, searchQuery) {
+    val displayedJobs = remember(jobs, selectedSourceIds, selectedLocationGroups, selectedCountries, searchQuery) {
         jobs.asSequence()
             .filter { it.sourceId in selectedSourceIds }
-            .filter { it.locationGroup() in selectedLocationGroups }
+            .filter { it.matchesLocationFilters(selectedLocationGroups, selectedCountries) }
             .filter { job ->
                 searchQuery.isBlank() ||
                 job.title.contains(searchQuery, ignoreCase = true) ||
@@ -96,7 +97,7 @@ private fun JobChanApp(openJob: (JobEntity) -> Unit) {
                 job.sourceJobId.contains(searchQuery, ignoreCase = true) ||
                 job.location.contains(searchQuery, ignoreCase = true)
             }
-            .sortedWith(compareByDescending<JobEntity> { it.postedAt }.thenByDescending { it.firstSeenAt })
+            .sortedWith(compareBy<JobEntity> { it.locationGroup().priority }.thenByDescending { it.postedAt }.thenByDescending { it.firstSeenAt })
             .toList()
     }
 
@@ -188,33 +189,45 @@ private fun JobChanApp(openJob: (JobEntity) -> Unit) {
                     }
                 }
 
-                Divider(Modifier.padding(vertical = 8.dp))
-                Text(
-                    text = "LOCATION REGIONS",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                )
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    LocationGroup.entries.forEach { group ->
-                        FilterChip(
-                            selected = group in selectedLocationGroups,
-                            onClick = {
-                                val next = selectedLocationGroups.toMutableSet().apply {
-                                    if (group in this && size > 1) remove(group) else add(group)
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    OutlinedButton(onClick = { showLocationMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                        val summary = buildList {
+                            selectedLocationGroups.forEach { add(it.label) }
+                            if (selectedCountries.isNotEmpty()) add("${selectedCountries.size} countries")
+                        }.joinToString(" · ")
+                        Text("Locations: $summary")
+                    }
+                    DropdownMenu(
+                        expanded = showLocationMenu,
+                        onDismissRequest = { showLocationMenu = false },
+                        modifier = Modifier.heightIn(max = 440.dp)
+                    ) {
+                        Text("REGIONS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 8.dp))
+                        LocationGroup.entries.forEach { group ->
+                            DropdownMenuItem(
+                                text = { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(group in selectedLocationGroups, null); Spacer(Modifier.width(8.dp)); Text(group.label) } },
+                                onClick = {
+                                    val next = selectedLocationGroups.toMutableSet().apply {
+                                        if (group in this && size > 1) remove(group) else add(group)
+                                    }
+                                    selectedLocationGroups = next
+                                    AppGraph.preferences.setSelectedLocationGroups(next)
                                 }
-                                selectedLocationGroups = next
-                                AppGraph.preferences.setSelectedLocationGroups(next)
-                            },
-                            label = { Text(group.label) }
-                        )
+                            )
+                        }
+                        HorizontalDivider()
+                        Text("OTHER COUNTRIES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 8.dp))
+                        CountryPreset.entries.forEach { country ->
+                            DropdownMenuItem(
+                                text = { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(country in selectedCountries, null); Spacer(Modifier.width(8.dp)); Text(country.label) } },
+                                onClick = {
+                                    val next = selectedCountries.toMutableSet().apply { if (country in this) remove(country) else add(country) }
+                                    selectedCountries = next
+                                    AppGraph.preferences.setSelectedCountries(next)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -242,7 +255,12 @@ private fun JobChanApp(openJob: (JobEntity) -> Unit) {
                                             Toast.makeText(context, "Select at least one active company from sidebar", Toast.LENGTH_SHORT).show()
                                             return@launch
                                         }
-                                        val newJobsCount = AppGraph.repository.refresh(activeSourceIds.toSet(), AppGraph.preferences.initializedSources(activeSourceIds))
+                                        val newJobsCount = AppGraph.repository.refresh(
+                                            activeSourceIds.toSet(),
+                                            AppGraph.preferences.initializedSources(activeSourceIds),
+                                            selectedLocationGroups,
+                                            selectedCountries
+                                        )
                                         AppGraph.preferences.setInitialized(activeSourceIds)
                                         if (newJobsCount == 0) {
                                             Toast.makeText(context, "That's all postings as of now", Toast.LENGTH_SHORT).show()
@@ -462,6 +480,11 @@ private fun AddCompanyDialog(
                 )
 
                 if (adapterType == "workday") {
+                    Text(
+                        "Location facets in this body are ignored. JobChan fetches broadly and applies your readable location filters locally.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     OutlinedTextField(
                         value = requestJson,
                         onValueChange = { requestJson = it },
@@ -485,6 +508,7 @@ private fun AddCompanyDialog(
                                 adapterType = adapterType,
                                 endpoint = endpoint.trim(),
                                 requestJson = requestJson.trim(),
+                                clientSideLocationFiltering = true,
                                 supported = true
                             )
                         )
@@ -500,18 +524,17 @@ private fun AddCompanyDialog(
     )
 }
 
-private fun JobEntity.locationGroup(): LocationGroup = when {
-    location.contains("india", ignoreCase = true) || location.contains("bangalore", ignoreCase = true) || location.contains("bengaluru", ignoreCase = true) -> LocationGroup.INDIA
-    location.contains("remote", ignoreCase = true) -> LocationGroup.REMOTE
-    else -> LocationGroup.OTHER
-}
-
 class JobWatchWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = try {
         val allSources = JobSourceRegistry.sources(applicationContext)
         val selectedSources = AppGraph.preferences.selectedSources(allSources.map { it.sourceId })
         val activeSourceIds = allSources.filter { it.supported && it.sourceId in selectedSources }.map { it.sourceId }
-        AppGraph.repository.refresh(activeSourceIds.toSet(), AppGraph.preferences.initializedSources(activeSourceIds))
+        AppGraph.repository.refresh(
+            activeSourceIds.toSet(),
+            AppGraph.preferences.initializedSources(activeSourceIds),
+            AppGraph.preferences.selectedLocationGroups(),
+            AppGraph.preferences.selectedCountries()
+        )
         AppGraph.preferences.setInitialized(activeSourceIds)
         Result.success()
     } catch (_: ConfigurationException) {

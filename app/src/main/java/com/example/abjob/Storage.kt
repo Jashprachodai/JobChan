@@ -112,9 +112,13 @@ class Preferences(context: Context) {
     fun setSelectedSources(sourceIds: Set<String>) = prefs.edit().putStringSet("selected_sources", sourceIds).apply()
     fun selectedLocationGroups(): Set<LocationGroup> =
         prefs.getStringSet("location_groups", null)?.mapNotNull { value -> LocationGroup.entries.find { it.name == value } }?.toSet()
-            ?: LocationGroup.entries.toSet()
+            ?: setOf(LocationGroup.INDIA)
     fun setSelectedLocationGroups(groups: Set<LocationGroup>) =
         prefs.edit().putStringSet("location_groups", groups.map { it.name }.toSet()).apply()
+    fun selectedCountries(): Set<CountryPreset> =
+        prefs.getStringSet("countries", emptySet())?.mapNotNull { value -> CountryPreset.entries.find { it.name == value } }?.toSet().orEmpty()
+    fun setSelectedCountries(countries: Set<CountryPreset>) =
+        prefs.edit().putStringSet("countries", countries.map { it.name }.toSet()).apply()
     fun initializedSources(sourceIds: List<String>): Set<String> = sourceIds.filterTo(mutableSetOf()) { sourceId ->
         prefs.getBoolean("initialized:$sourceId", sourceId == "workday:airbus" && prefs.getBoolean("initialized", false))
     }
@@ -144,6 +148,43 @@ class Preferences(context: Context) {
 }
 
 enum class LocationGroup(val label: String) { INDIA("India"), REMOTE("Remote"), OTHER("Other countries") }
+
+enum class CountryPreset(val label: String, vararg val aliases: String) {
+    UNITED_STATES("United States", "united states", "usa", "u.s.", "us-", "san francisco", "new york", "seattle", "atlanta", "chicago"),
+    UNITED_KINGDOM("United Kingdom", "united kingdom", "uk", "london", "manchester"),
+    CANADA("Canada", "canada", "toronto", "vancouver", "montreal"),
+    GERMANY("Germany", "germany", "berlin", "munich", "münchen", "hamburg"),
+    SINGAPORE("Singapore", "singapore"),
+    AUSTRALIA("Australia", "australia", "sydney", "melbourne"),
+    JAPAN("Japan", "japan", "tokyo"),
+    NETHERLANDS("Netherlands", "netherlands", "amsterdam")
+}
+
+private val INDIA_LOCATION_ALIASES = listOf(
+    "india", "bangalore", "bengaluru", "mumbai", "bombay", "delhi", "new delhi",
+    "gurugram", "gurgaon", "noida", "hyderabad", "pune", "chennai", "kolkata",
+    "ahmedabad", "kochi", "cochin", "jaipur", "indore", "bhubaneswar", "trivandrum"
+)
+
+fun JobEntity.locationGroup(): LocationGroup = when {
+    INDIA_LOCATION_ALIASES.any { location.contains(it, ignoreCase = true) } -> LocationGroup.INDIA
+    location.contains("remote", ignoreCase = true) || location.contains("work from home", ignoreCase = true) -> LocationGroup.REMOTE
+    else -> LocationGroup.OTHER
+}
+
+fun JobEntity.matchesLocationFilters(groups: Set<LocationGroup>, countries: Set<CountryPreset>): Boolean {
+    val group = locationGroup()
+    if (group !in groups) return false
+    return group != LocationGroup.OTHER ||
+        countries.isEmpty() ||
+        countries.any { country -> country.aliases.any { location.contains(it, ignoreCase = true) } }
+}
+
+val LocationGroup.priority: Int get() = when (this) {
+    LocationGroup.INDIA -> 0
+    LocationGroup.REMOTE -> 1
+    LocationGroup.OTHER -> 2
+}
 
 object AppGraph {
     private lateinit var context: Context
