@@ -1,36 +1,75 @@
-# Airbus Bangalore Job Watcher
+# JobChan
 
-An Android 12+ app that periodically queries Airbus's public Workday jobs API, stores a local snapshot, and sends a notification only for jobs not previously seen.
+JobChan is an Android 12+ multi-company job watcher. It polls public career boards, normalizes postings into one local feed, and notifies the user when a selected company has a new job matching their location preferences.
 
-## Chosen approach
+## Current capabilities
 
-- **Language/UI:** Kotlin, Jetpack Compose, Material 3.
-- **Networking:** Retrofit + Kotlin serialization, using a `POST` request.
-- **Persistence:** Room stores a job's immutable Workday requisition ID and its snapshot.
-- **Scheduling:** WorkManager runs every 30 minutes (Android's minimum periodic interval is 15 minutes, and its timing is intentionally inexact). A manual refresh is also available.
-- **Android target:** `minSdk 31` (Android 12), `targetSdk 35`.
+- Kotlin, Jetpack Compose, Material 3, Room, Retrofit, and WorkManager.
+- A company sidebar with persistent selection and custom-source management.
+- Public source adapters for Workday and Greenhouse.
+- Built-in sources: Airbus, Razorpay, Discord, Anthropic, and Stripe. Some future companies are listed as unavailable until their adapter is implemented.
+- Add a custom Greenhouse or Workday company by supplying its public endpoint; Workday also needs its public request-body template.
+- A location dropdown for India, Remote, Other countries, and selectable country presets.
+- India postings are always ranked above Remote and other-country postings.
+- Each company has a separate first-refresh baseline, so enabling a new company does not notify for its historical backlog.
+- Tapping a card opens the official job application page.
 
-The app is designed so the exact Workday endpoint and filter JSON are supplied in `local.properties`, not committed to source control. This avoids guessing at a location ID or publishing it in the app.
+## Source architecture
 
-## Configure
+`JobSourceConfig` describes a company board and `JobSourceAdapter` converts provider-specific data to `FetchedJob`. `JobRepository` then stores a normalized `JobEntity` using this globally unique identity:
 
-Add these entries to `local.properties` (replace the examples with the request captured from the Airbus portal's browser network inspector):
+```text
+sourceId:sourceJobId
+```
+
+This avoids clashes when different companies use the same job/requisition ID. New providers require an adapter; entering an arbitrary URL does not make an unsupported API compatible.
+
+## Location filtering without provider IDs
+
+Users never need to discover or enter opaque Workday location IDs.
+
+- **Workday:** common location facets in a supplied request template are removed. The app searches with readable terms such as `India`, `Remote`, or `Germany`, then verifies each returned job locally.
+- **Greenhouse:** the public board is fetched and jobs are filtered locally.
+- **Other countries:** with no countries selected, JobChan searches a practical global set. Selecting countries narrows it to those choices.
+
+The location normalizer recognizes country names and common city-only labels. For India, this includes Bengaluru/Bangalore, Mumbai, Delhi NCR, Hyderabad, Pune, Chennai, Kolkata, Ahmedabad, Kochi, Jaipur, and more.
+
+Because Workday searches are narrowed results rather than a complete global snapshot, the app does not infer that a missing Workday job has closed. A failed source request also never deletes cached jobs.
+
+## Configure Airbus
+
+`local.properties` is deliberately excluded from source control. Add the public Airbus endpoint and a request template:
 
 ```properties
 AIRBUS_API_URL=https://ag.wd3.myworkdayjobs.com/wday/cxs/airbus/Airbus/jobs
-AIRBUS_REQUEST_JSON={"limit":20,"offset":0,"searchText":"","appliedFacets":{"locations":["YOUR_BANGALORE_LOCATION_ID"]}}
+AIRBUS_REQUEST_JSON={"limit":20,"offset":0,"searchText":"","appliedFacets":{}}
 ```
 
-`AIRBUS_REQUEST_JSON` must be JSON and must contain `limit` and `offset`. The app begins at offset `0` and follows subsequent pages while `total` indicates more results. The location facet must be the one returned by Airbus Workday for Bangalore; retain any country/India facet required by the portal's request.
+`AIRBUS_REQUEST_JSON` must be valid JSON with `limit` and `offset`. You may keep other non-location filters in the template. JobChan removes common provider location facets and applies the location selections in the app.
 
-## What counts as new
+## Add a custom company
 
-A job is new when its stable Workday ID (`bulletFields` / `externalPath` / job requisition ID, in that order) is absent from the Room database. On the very first successful refresh, the app saves the current jobs silently: it does not notify for the historical backlog. Later runs notify once per newly observed ID. A changed title or description does not re-notify.
+From the sidebar, select **Add company** and enter:
 
-## Reading and applying
+- Company name
+- Adapter type: `Greenhouse` or `Workday`
+- Public API endpoint
+- For Workday only: public request-body JSON
 
-The main list reads stored jobs offline. Selecting a row opens the official Airbus Workday job URL in a Custom Tab, where the candidate can read the complete description and apply. No login credentials are stored or sent by this app.
+Do not add login cookies, API secrets, or private endpoints. The app is designed for anonymous public career boards.
 
-## Important delivery constraint
+## Notifications and scheduling
 
-WorkManager is battery-friendly rather than exact; Android may defer a 30-minute run during Doze or restrictive device modes. If a guaranteed, low-latency alert is essential, place the identical request and de-duplication database on a server, and deliver Firebase Cloud Messaging notifications to the app. The included app is intentionally the simple, privacy-preserving device-only option.
+A job is new when its `sourceId:sourceJobId` is not in the local Room database. Only newly observed jobs that match the currently selected location filters trigger a notification.
+
+WorkManager schedules checks every 30 minutes. Android may defer periodic work for battery saving or Doze mode; it is not an exact scheduler. For guaranteed near-real-time alerts, move source polling and de-duplication to a backend and send Firebase Cloud Messaging notifications.
+
+## Build
+
+Open the project in Android Studio with Java 17+ and run:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+The debug APK is produced at `app/build/outputs/apk/debug/app-debug.apk`.
