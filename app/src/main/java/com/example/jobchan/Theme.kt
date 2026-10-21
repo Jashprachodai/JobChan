@@ -1,4 +1,4 @@
-package com.example.abjob
+package com.example.jobchan
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*

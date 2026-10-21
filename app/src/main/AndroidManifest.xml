@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:name=".App" android:allowBackup="true" android:label="Airbus Job Watcher" android:theme="@style/Theme.ABJob">
+    <application android:name=".App" android:allowBackup="true" android:label="JobChan" android:icon="@drawable/mascot" android:theme="@style/Theme.JobChan">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
