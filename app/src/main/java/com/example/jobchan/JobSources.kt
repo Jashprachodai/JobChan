@@ -1,4 +1,4 @@
-package com.example.abjob
+package com.example.jobchan
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -44,8 +44,8 @@ object JobSourceRegistry {
             companyId = "airbus",
             companyName = "Airbus",
             adapterType = "workday",
-            endpoint = BuildConfig.AIRBUS_API_URL,
-            requestJson = BuildConfig.AIRBUS_REQUEST_JSON
+            endpoint = "https://ag.wd3.myworkdayjobs.com/wday/cxs/ag/Airbus/jobs",
+            requestJson = """{"appliedFacets":{},"limit":20,"offset":0,"searchText":""}"""
         ),
         JobSourceConfig("greenhouse:razorpay", "razorpay", "Razorpay", "greenhouse", "https://boards-api.greenhouse.io/v1/boards/razorpaysoftwareprivatelimited/jobs?content=true"),
         JobSourceConfig("greenhouse:discord", "discord", "Discord", "greenhouse", "https://boards-api.greenhouse.io/v1/boards/discord/jobs?content=true"),
@@ -105,7 +105,7 @@ class WorkdayAdapter : JobSourceAdapter {
                 val body = configured.withoutProviderLocationFacets(config.clientSideLocationFiltering)
                 val response = api.jobs(config.endpoint, JsonObject(body + mapOf("offset" to JsonPrimitive(offset), "searchText" to JsonPrimitive(term))))
                 val postings = response["jobPostings"]?.jsonArray.orEmpty()
-                jobs += postings.mapNotNull(::toJob)
+                jobs += postings.mapNotNull { toJob(it, config) }
                 total = response["total"]?.jsonPrimitive?.intOrNull ?: postings.size
                 offset += pageSize
             } while (offset < total && postings.isNotEmpty())
@@ -121,7 +121,7 @@ class WorkdayAdapter : JobSourceAdapter {
         return JsonObject(this + ("appliedFacets" to unfilteredFacets))
     }
 
-    private fun toJob(value: JsonElement): FetchedJob? {
+    private fun toJob(value: JsonElement, config: JobSourceConfig): FetchedJob? {
         val item = value.jsonObject
         val path = item["externalPath"]?.jsonPrimitive?.contentOrNull ?: return null
         val fields = item["bulletFields"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
@@ -136,7 +136,7 @@ class WorkdayAdapter : JobSourceAdapter {
             location = location,
             postedOn = postedOn,
             postedAt = parsePostedAt(postedOn),
-            canonicalUrl = toAirbusUrl(path)
+            canonicalUrl = toWorkdayUrl(config.endpoint, path)
         )
     }
 
@@ -155,13 +155,12 @@ class WorkdayAdapter : JobSourceAdapter {
         }
     }
 
-    private fun toAirbusUrl(path: String): String {
+    private fun toWorkdayUrl(endpoint: String, path: String): String {
+        if (path.startsWith("http://") || path.startsWith("https://")) return path
+        val boardUri = java.net.URI(endpoint)
+        val origin = "${boardUri.scheme}://${boardUri.authority}"
         val cleanPath = if (path.startsWith("/")) path else "/$path"
-        return when {
-            cleanPath.startsWith("/en-US/Airbus") || cleanPath.startsWith("/Airbus") -> "https://ag.wd3.myworkdayjobs.com$cleanPath"
-            cleanPath.startsWith("/en-US/") -> "https://ag.wd3.myworkdayjobs.com/en-US/Airbus${cleanPath.removePrefix("/en-US")}" 
-            else -> "https://ag.wd3.myworkdayjobs.com/en-US/Airbus$cleanPath"
-        }
+        return "$origin$cleanPath"
     }
 }
 
@@ -244,11 +243,11 @@ class JobRepository(
     )
 
     private fun readableSearchTerms(groups: Set<LocationGroup>, countries: Set<CountryPreset>): List<String> = buildList {
-        if (LocationGroup.INDIA in groups) add("India")
+        if (LocationGroup.INDIA in groups) {
+            addAll(listOf("India", "Bangalore", "Bengaluru", "Gurugram", "Gurgaon", "Hyderabad", "Pune", "Noida", "Chennai", "Mumbai", "Delhi"))
+        }
         if (LocationGroup.REMOTE in groups) add("Remote")
         if (LocationGroup.OTHER in groups) {
-            // An empty country selection means "all other countries". Query a broad, practical set
-            // of country terms rather than attempting a 2,000-job unfiltered Workday scan.
             (if (countries.isEmpty()) CountryPreset.entries.toList() else countries.toList()).forEach { add(it.label) }
         }
     }

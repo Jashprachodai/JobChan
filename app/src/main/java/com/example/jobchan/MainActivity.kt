@@ -1,4 +1,4 @@
-package com.example.abjob
+package com.example.jobchan
 
 import android.Manifest
 import android.content.Context
@@ -538,13 +538,13 @@ class JobWatchWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         AppGraph.preferences.setInitialized(activeSourceIds)
         Result.success()
     } catch (_: ConfigurationException) {
-        Result.failure(workDataOf("reason" to "Configure AIRBUS_API_URL and AIRBUS_REQUEST_JSON"))
+        Result.failure(workDataOf("reason" to "Check the source endpoint and request body"))
     } catch (_: Exception) {
         Result.retry()
     }
 
     companion object {
-        private const val UNIQUE_NAME = "airbus-job-watch"
+        private const val UNIQUE_NAME = "jobchan-periodic-refresh"
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<JobWatchWorker>(30, TimeUnit.MINUTES)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())

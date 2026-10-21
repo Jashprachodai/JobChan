@@ -1,9 +1,7 @@
-package com.example.abjob
+package com.example.jobchan
 
 import android.content.Context
 import androidx.room.*
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -41,67 +39,8 @@ interface JobDao {
     @Query("DELETE FROM jobs WHERE sourceId = :sourceId") suspend fun deleteSource(sourceId: String)
 }
 
-@Database(entities = [JobEntity::class], version = 6, exportSchema = false)
+@Database(entities = [JobEntity::class], version = 1, exportSchema = false)
 abstract class JobDatabase : RoomDatabase() { abstract fun jobs(): JobDao }
-
-private fun addPostedAtMigration(fromVersion: Int) = object : Migration(fromVersion, 4) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("ALTER TABLE jobs ADD COLUMN postedAt INTEGER NOT NULL DEFAULT 0")
-    }
-}
-
-private val MIGRATION_1_4 = addPostedAtMigration(1)
-private val MIGRATION_2_4 = addPostedAtMigration(2)
-private val MIGRATION_3_4 = addPostedAtMigration(3)
-
-private val MIGRATION_4_5 = object : Migration(4, 5) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("""
-            CREATE TABLE IF NOT EXISTS jobs_new (
-                jobKey TEXT NOT NULL PRIMARY KEY,
-                sourceId TEXT NOT NULL,
-                companyId TEXT NOT NULL,
-                companyName TEXT NOT NULL,
-                sourceJobId TEXT NOT NULL,
-                title TEXT NOT NULL,
-                location TEXT NOT NULL,
-                postedOn TEXT,
-                postedAt INTEGER NOT NULL,
-                canonicalUrl TEXT NOT NULL,
-                firstSeenAt INTEGER NOT NULL
-            )
-        """.trimIndent())
-        db.execSQL("""
-            INSERT INTO jobs_new (jobKey, sourceId, companyId, companyName, sourceJobId, title, location, postedOn, postedAt, canonicalUrl, firstSeenAt)
-            SELECT 'workday:airbus:' || id, 'workday:airbus', 'airbus', 'Airbus', id, title, location, postedOn, postedAt,
-                CASE
-                    WHEN externalPath LIKE '/en-US/Airbus%' OR externalPath LIKE '/Airbus%' THEN 'https://ag.wd3.myworkdayjobs.com' || externalPath
-                    WHEN externalPath LIKE '/en-US/%' THEN 'https://ag.wd3.myworkdayjobs.com/en-US/Airbus' || substr(externalPath, 7)
-                    WHEN externalPath LIKE '/%' THEN 'https://ag.wd3.myworkdayjobs.com/en-US/Airbus' || externalPath
-                    ELSE 'https://ag.wd3.myworkdayjobs.com/en-US/Airbus/' || externalPath
-                END,
-                firstSeenAt
-            FROM jobs
-        """.trimIndent())
-        db.execSQL("DROP TABLE jobs")
-        db.execSQL("ALTER TABLE jobs_new RENAME TO jobs")
-    }
-}
-
-private val MIGRATION_5_6 = object : Migration(5, 6) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("""
-            UPDATE jobs SET canonicalUrl =
-                CASE
-                    WHEN canonicalUrl LIKE '/en-US/Airbus%' OR canonicalUrl LIKE '/Airbus%' THEN 'https://ag.wd3.myworkdayjobs.com' || canonicalUrl
-                    WHEN canonicalUrl LIKE '/en-US/%' THEN 'https://ag.wd3.myworkdayjobs.com/en-US/Airbus' || substr(canonicalUrl, 7)
-                    WHEN canonicalUrl LIKE '/%' THEN 'https://ag.wd3.myworkdayjobs.com/en-US/Airbus' || canonicalUrl
-                    ELSE canonicalUrl
-                END
-            WHERE sourceId = 'workday:airbus' AND canonicalUrl NOT LIKE 'http%'
-        """.trimIndent())
-    }
-}
 
 class Preferences(context: Context) {
     private val prefs = context.getSharedPreferences("watcher", Context.MODE_PRIVATE)
@@ -120,7 +59,7 @@ class Preferences(context: Context) {
     fun setSelectedCountries(countries: Set<CountryPreset>) =
         prefs.edit().putStringSet("countries", countries.map { it.name }.toSet()).apply()
     fun initializedSources(sourceIds: List<String>): Set<String> = sourceIds.filterTo(mutableSetOf()) { sourceId ->
-        prefs.getBoolean("initialized:$sourceId", sourceId == "workday:airbus" && prefs.getBoolean("initialized", false))
+        prefs.getBoolean("initialized:$sourceId", false)
     }
     fun setInitialized(sourceIds: List<String>) = prefs.edit().apply {
         sourceIds.forEach { putBoolean("initialized:$it", true) }
@@ -161,13 +100,19 @@ enum class CountryPreset(val label: String, vararg val aliases: String) {
 }
 
 private val INDIA_LOCATION_ALIASES = listOf(
-    "india", "bangalore", "bengaluru", "mumbai", "bombay", "delhi", "new delhi",
-    "gurugram", "gurgaon", "noida", "hyderabad", "pune", "chennai", "kolkata",
-    "ahmedabad", "kochi", "cochin", "jaipur", "indore", "bhubaneswar", "trivandrum"
+    "india", "ind", "bangalore", "bengaluru", "mumbai", "bombay", "delhi", "new delhi",
+    "gurugram", "gurgaon", "noida", "hyderabad", "pune", "chennai", "madras", "kolkata",
+    "calcutta", "ahmedabad", "kochi", "cochin", "jaipur", "indore", "bhubaneswar",
+    "trivandrum", "thiruvananthapuram", "chandigarh", "mohali", "coimbatore", "nagpur",
+    "vadodara", "surat", "visakhapatnam", "vizag", "ghaziabad", "faridabad",
+    "gurgaon area", "bangalore area", "gurugram area", "karnataka", "maharashtra",
+    "telangana", "tamil nadu", "haryana", "uttar pradesh"
 )
 
+private val INDIA_REGEX = Regex("""\b(IN|IND|India|Bangalore|Bengaluru|Gurugram|Gurgaon|Noida|Hyderabad|Pune|Mumbai|Delhi|Chennai|Kolkata|Ahmedabad|Kochi|Jaipur)\b""", RegexOption.IGNORE_CASE)
+
 fun JobEntity.locationGroup(): LocationGroup = when {
-    INDIA_LOCATION_ALIASES.any { location.contains(it, ignoreCase = true) } -> LocationGroup.INDIA
+    INDIA_LOCATION_ALIASES.any { location.contains(it, ignoreCase = true) } || INDIA_REGEX.containsMatchIn(location) -> LocationGroup.INDIA
     location.contains("remote", ignoreCase = true) || location.contains("work from home", ignoreCase = true) -> LocationGroup.REMOTE
     else -> LocationGroup.OTHER
 }
@@ -195,7 +140,6 @@ object AppGraph {
         if (::context.isInitialized) return
         context = appContext
         database = Room.databaseBuilder(context, JobDatabase::class.java, "jobs.db")
-            .addMigrations(MIGRATION_1_4, MIGRATION_2_4, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
         preferences = Preferences(context)
         repository = JobRepository(database.jobs(), NotificationHelper(context), context)

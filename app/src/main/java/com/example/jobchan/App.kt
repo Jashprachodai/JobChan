@@ -1,4 +1,4 @@
-package com.example.abjob
+package com.example.jobchan
 
 import android.app.Application
 

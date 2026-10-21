@@ -36,17 +36,6 @@ The location normalizer recognizes country names and common city-only labels. Fo
 
 Because Workday searches are narrowed results rather than a complete global snapshot, the app does not infer that a missing Workday job has closed. A failed source request also never deletes cached jobs.
 
-## Configure Airbus
-
-`local.properties` is deliberately excluded from source control. Add the public Airbus endpoint and a request template:
-
-```properties
-AIRBUS_API_URL=https://ag.wd3.myworkdayjobs.com/wday/cxs/airbus/Airbus/jobs
-AIRBUS_REQUEST_JSON={"limit":20,"offset":0,"searchText":"","appliedFacets":{}}
-```
-
-`AIRBUS_REQUEST_JSON` must be valid JSON with `limit` and `offset`. You may keep other non-location filters in the template. JobChan removes common provider location facets and applies the location selections in the app.
-
 ## Add a custom company
 
 From the sidebar, select **Add company** and enter:
@@ -57,6 +46,8 @@ From the sidebar, select **Add company** and enter:
 - For Workday only: public request-body JSON
 
 Do not add login cookies, API secrets, or private endpoints. The app is designed for anonymous public career boards.
+
+The built-in companies use public, anonymous endpoints. Workday request bodies always require valid JSON containing `limit` and `offset`; JobChan removes common provider location facets and applies the selected readable location filters.
 
 ## Notifications and scheduling
 
